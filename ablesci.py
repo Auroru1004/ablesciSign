@@ -82,7 +82,17 @@ def load_env_file():
 
     if ENV_ACCOUNTS in os.environ:
         val = os.environ[ENV_ACCOUNTS]
-        print(f"当前 {ENV_ACCOUNTS} 内容预览: {val[:100]}{'...' if len(val) > 100 else ''}")
+        # 2026-09-15 隐私修复：原版直接按原样打印账号行，会把密码明文写进
+        # cron 输出/日志。现在只保留邮箱前缀，密码一律隐去。
+        safe_lines = []
+        for line in val.splitlines():
+            if ":" in line:
+                local = line.split(":", 1)[0].strip()
+                safe_lines.append((local[:2] + "***") if local else "***")
+            else:
+                safe_lines.append("***")
+        safe = " / ".join(safe_lines)
+        print(f"当前 {ENV_ACCOUNTS} 内容预览: {safe}（共 {len(safe_lines)} 个账号，密码已隐藏）")
 
 load_env_file()
 
@@ -208,15 +218,30 @@ class AbleSciAuto:
         self.notifier.log(message, level)
         
     def get_csrf_token(self):
-        """获取CSRF令牌"""
+        """获取CSRF令牌
+
+        2026-09-15 站点前端改版：登录页不再输出 <input name="_csrf">，
+        令牌改为 <meta name="csrf-token" content="...">（同名 input 由 JS 在提交前填充，
+        静态抓取拿不到），同时新增 iframe 图形验证码（仅风控命中时触发）与
+        /site/confirm-login 二次确认（实测签到不需要走这一步）。
+        保留 input[_csrf] 作为回退，防止站点再改回去。
+        """
         login_url = "https://www.ablesci.com/site/login"
         try:
             response = self.session.get(login_url, headers=self.headers, timeout=30)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                csrf_token = soup.find('input', {'name': '_csrf'})
-                if csrf_token:
-                    return csrf_token.get('value', '')
+                token = ''
+                meta = soup.find('meta', {'name': 'csrf-token'})
+                if meta and meta.get('content'):
+                    token = meta.get('content', '').strip()
+                if not token:
+                    csrf_input = soup.find('input', {'name': '_csrf'})
+                    if csrf_input:
+                        token = csrf_input.get('value', '')
+                if token:
+                    return token
+                self.log("CSRF令牌元素未找到（meta[csrf-token] 与 input[_csrf] 均缺失，页面结构可能再次变更）", "error")
             else:
                 self.log(f"获取CSRF令牌失败，状态码: {response.status_code}", "error")
         except Exception as e:
@@ -396,9 +421,7 @@ def get_accounts():
     if not accounts_env:
         return []
     
-    # 调试输出
-    print(f"原始账号环境变量内容: {repr(accounts_env)}")
-    
+    # 2026-09-15 隐私修复：原版此处打印原始账号串（含明文密码），已移除
     accounts = []
     # 支持换行符、分号、逗号分隔
     for line in accounts_env.splitlines():
